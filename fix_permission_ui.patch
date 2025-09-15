@@ -1,0 +1,26 @@
+--- components/RepairSession.tsx.orig
++++ components/RepairSession.tsx
+@@ -102,6 +102,7 @@
+         } else {
+           setPermissionStatus('unknown');
++          setShowPermissionUI(true); // Show UI immediately if permissions needed
+           console.log('❓ Microphone permissions need to be requested');
+         }
+       } catch (error) {
+@@ -677,6 +678,15 @@
+               {permissionStatus === 'requesting' && (
+                 <Text style={styles.permissionSubtext}>
+                   Please allow microphone access when prompted by your device.
+                 </Text>
+               )}
++              {(permissionStatus === 'unknown') && (
++                <TouchableOpacity 
++                  style={styles.permissionButton} 
++                  onPress={requestMicrophonePermission}
++                >
++                  <Text style={styles.permissionButtonText}>Allow Microphone Access</Text>
++                </TouchableOpacity>
++              )}
+               {permissionStatus === 'denied' && (
+                 <>
+                   <Text style={styles.permissionSubtext}>

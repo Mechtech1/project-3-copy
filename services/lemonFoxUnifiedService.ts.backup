@@ -1,0 +1,424 @@
+import { Audio } from 'expo-av';
+import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system';
+
+export class LemonFoxUnifiedService {
+  private static instance: LemonFoxUnifiedService;
+  private apiKey: string;
+  private baseUrl = 'https://api.lemonfox.ai/v1';
+  private currentSound: Audio.Sound | null = null;
+  private recording: Audio.Recording | null = null;
+  private isPlaying = false;
+  private isRecording = false;
+  private currentMode: 'idle' | 'speaking' | 'listening' = 'idle';
+
+  static getInstance(): LemonFoxUnifiedService {
+    if (!LemonFoxUnifiedService.instance) {
+      LemonFoxUnifiedService.instance = new LemonFoxUnifiedService();
+    }
+    return LemonFoxUnifiedService.instance;
+  }
+
+  private constructor() {
+    this.apiKey = process.env.EXPO_PUBLIC_LEMON_FOX_API_KEY || '';
+    
+    // Debug logging to check API key loading
+    console.log('🦊🔍 Debug API Key Loading:');
+    console.log('- Raw env value:', process.env.EXPO_PUBLIC_LEMON_FOX_API_KEY);
+    console.log('- API key length:', this.apiKey.length);
+    console.log('- API key first 10 chars:', this.apiKey.substring(0, 10));
+    console.log('- API key last 10 chars:', this.apiKey.substring(this.apiKey.length - 10));
+    
+    if (!this.apiKey) {
+      console.warn('⚠️ Lemon Fox API key not found. Please set EXPO_PUBLIC_LEMON_FOX_API_KEY in your .env file');
+    } else {
+      console.log('✅ Lemon Fox API key loaded successfully');
+    }
+    this.initializeAudio();
+  }
+
+  private async initializeAudio(): Promise<void> {
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+        staysActiveInBackground: true,
+      });
+      
+      // Activate the audio session
+      await Audio.setIsEnabledAsync(true);
+      
+      console.log('🦊 Lemon Fox Audio Service initialized');
+    } catch (error) {
+      console.error('Failed to initialize audio:', error);
+    }
+  }
+
+  // ==================== TTS METHODS ====================
+  async speak(text: string): Promise<void> {
+    try {
+      if (!this.apiKey) {
+        throw new Error('Lemon Fox API key not configured');
+      }
+
+      // CRITICAL: Stop ALL audio operations and wait for cleanup
+      await this.stopAll();
+      await new Promise(resolve => setTimeout(resolve, 200)); // Wait for cleanup
+      
+      this.currentMode = 'speaking';
+
+      console.log('🦊🔊 Starting Lemon Fox TTS...');
+
+      // Ensure audio session is properly activated BEFORE generating speech
+      await Audio.setIsEnabledAsync(true);
+      if (Platform.OS === 'ios') {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false, // CRITICAL: Disable recording during TTS
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: false,
+          playThroughEarpieceAndroid: false,
+          staysActiveInBackground: true,
+        });
+        // Wait for iOS to apply the settings
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+
+      // Generate speech with Lemon Fox
+      const audioFilePath = await this.synthesizeSpeech(text);
+      
+      // Play the audio and wait for completion
+      await this.playAudioAndWait(audioFilePath);
+      
+      // CRITICAL: Wait after TTS completes before allowing STT
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      this.currentMode = 'idle';
+      console.log('🦊✅ TTS completed successfully');
+    } catch (error) {
+      this.currentMode = 'idle';
+      console.error('🦊❌ TTS error:', error);
+      throw error;
+    }
+  }
+
+  private async synthesizeSpeech(text: string): Promise<string> {
+    console.log('🦊🔍 TTS API Call Debug:');
+    console.log('- API Key being used:', this.apiKey.substring(0, 10) + '...' + this.apiKey.substring(this.apiKey.length - 10));
+    console.log('- URL:', `${this.baseUrl}/audio/speech`);
+    console.log('- Text to synthesize:', text);
+    
+    const response = await fetch(`${this.baseUrl}/audio/speech`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'tts-1',
+        input: text,
+        voice: 'alloy',
+        response_format: 'mp3',
+      }),
+    });
+
+    console.log('🦊🔍 TTS Response Debug:');
+    console.log('- Status:', response.status);
+    console.log('- Status Text:', response.statusText);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.log('- Error Response Body:', errorText);
+      throw new Error(`Lemon Fox TTS API error: ${response.status} ${response.statusText}`);
+    }
+
+    // Use file-based approach instead of base64 data URI
+    const arrayBuffer = await response.arrayBuffer();
+    const tempFilePath = FileSystem.cacheDirectory + `speech_${Date.now()}.mp3`;
+    
+    const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+    await FileSystem.writeAsStringAsync(tempFilePath, base64Audio, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    
+    console.log('🦊✅ Audio file saved to:', tempFilePath);
+    return tempFilePath;
+  }
+
+  private async playAudioAndWait(audioFilePath: string): Promise<void> {
+    return new Promise(async (resolve, reject) => {
+      try {
+        console.log('🦊🔊 Playing audio from file:', audioFilePath);
+        
+        // Ensure audio session is activated
+        await Audio.setIsEnabledAsync(true);
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false, 
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: false,
+          playThroughEarpieceAndroid: false,
+          staysActiveInBackground: true,
+        });
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: audioFilePath },
+        { shouldPlay: true, volume: 1.0 }
+      );
+      
+      this.currentSound = sound;
+      this.isPlaying = true;
+
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          this.isPlaying = false;
+          this.currentSound = null;
+        }
+      });
+
+      await sound.playAsync();
+    } catch (error) {
+      this.isPlaying = false;
+      this.currentSound = null;
+      throw error;
+    }
+  }
+
+  async stopSpeaking(): Promise<void> {
+    if (this.currentSound) {
+      await this.currentSound.unloadAsync();
+      this.currentSound = null;
+    }
+    this.isPlaying = false;
+    if (this.currentMode === 'speaking') {
+      this.currentMode = 'idle';
+    }
+  }
+
+  // ==================== STT METHODS ====================
+  async startListening(): Promise<void> {
+    try {
+      // Stop any current operations
+      await this.stopAll();
+      this.currentMode = 'listening';
+
+      console.log('🦊🎤 Starting Lemon Fox STT recording...');
+
+      // Request permissions
+      const { status } = await Audio.requestPermissionsAsync();
+      if (status !== 'granted') {
+        throw new Error('Audio recording permission not granted');
+      }
+
+      // Set recording mode
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+        staysActiveInBackground: false,
+      });
+
+      // Start recording with simplified configuration
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+
+      this.recording = recording;
+      this.isRecording = true;
+      console.log('🦊🎤 Recording started');
+    } catch (error) {
+      this.currentMode = 'idle';
+      console.error('🦊❌ Failed to start recording:', error);
+      throw error;
+    }
+  }
+
+  async stopListening(): Promise<string> {
+    try {
+      if (!this.recording || !this.isRecording) {
+        console.warn('🦊⚠️ No active recording to stop, returning empty string');
+        return '';
+      }
+
+      await this.recording.stopAndUnloadAsync();
+      const uri = this.recording.getURI();
+      
+      this.recording = null;
+      this.isRecording = false;
+      this.currentMode = 'idle';
+      
+      if (!uri) {
+        throw new Error('No audio file generated');
+      }
+
+      console.log('🦊🎤 Recording stopped, transcribing...');
+      
+      // Transcribe with Lemon Fox
+      const transcript = await this.transcribeAudio(uri);
+      console.log('🦊✅ STT completed:', transcript);
+      
+      return transcript;
+    } catch (error) {
+      this.currentMode = 'idle';
+      this.recording = null;
+      this.isRecording = false;
+      console.error('🦊❌ STT error:', error);
+      throw error;
+    }
+  }
+
+  private async transcribeAudio(audioUri: string): Promise<string> {
+    try {
+      // Read the audio file
+      const audioInfo = await FileSystem.getInfoAsync(audioUri);
+      if (!audioInfo.exists) {
+        throw new Error('Audio file does not exist');
+      }
+
+      // Create form data
+      const formData = new FormData();
+      
+      // Add the audio file
+      formData.append('file', {
+        uri: audioUri,
+        type: 'audio/m4a',
+        name: 'recording.m4a',
+      } as any);
+      
+      formData.append('language', 'english');
+      formData.append('response_format', 'json');
+
+      const response = await fetch(`${this.baseUrl}/audio/transcriptions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Lemon Fox STT API error: ${response.status} ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      return result.text || '';
+    } catch (error) {
+      console.error('🦊❌ Transcription error:', error);
+      throw error;
+    }
+  }
+
+  // ==================== CONTINUOUS LISTENING (for compatibility) ====================
+  async startContinuousListening(
+    onResult: (transcript: string, isFinal?: boolean) => void,
+    onError?: (error: string) => void
+  ): Promise<void> {
+    try {
+      await this.startListening();
+      
+      // For now, we'll do a simple 3-second recording and transcribe
+      // You can enhance this later with voice activity detection
+      setTimeout(async () => {
+        try {
+          const transcript = await this.stopListening();
+          if (transcript.trim()) {
+            onResult(transcript, true);
+          }
+        } catch (error) {
+          onError?.(error instanceof Error ? error.message : 'Unknown error');
+        }
+      }, 3000);
+      
+    } catch (error) {
+      onError?.(error instanceof Error ? error.message : 'Failed to start listening');
+    }
+  }
+
+  async stopContinuousListening(): Promise<void> {
+    if (this.isRecording && this.recording) {
+      try {
+        const recordingToStop = this.recording;
+        this.recording = null;
+        this.isRecording = false;
+        this.currentMode = 'idle';
+        
+        await recordingToStop.stopAndUnloadAsync();
+      } catch (error) {
+        console.warn('🦊⚠️ Error stopping continuous listening:', error);
+      }
+    }
+  }
+
+  // ==================== UTILITY METHODS ====================
+  async stopAll(): Promise<void> {
+    try {
+      // Stop any current speech
+      if (this.currentSound) {
+        await this.currentSound.unloadAsync();
+        this.currentSound = null;
+      }
+      this.isPlaying = false;
+
+      // Stop any current recording with better state management
+      if (this.recording && this.isRecording) {
+        try {
+          const recordingToStop = this.recording;
+          this.recording = null;
+          this.isRecording = false;
+          
+          await recordingToStop.stopAndUnloadAsync();
+        } catch (error) {
+          console.warn('🦊⚠️ Error stopping recording:', error);
+        }
+      } else {
+        // Ensure state is clean even if no active recording
+        this.recording = null;
+        this.isRecording = false;
+      }
+
+      // Reset mode
+      this.currentMode = 'idle';
+      
+      console.log('🦊🛑 All audio operations stopped');
+    } catch (error) {
+      console.error('🦊❌ Error stopping all operations:', error);
+    }
+  }
+
+  getCurrentMode(): 'idle' | 'speaking' | 'listening' {
+    return this.currentMode;
+  }
+
+  isCurrentlyPlaying(): boolean {
+    return this.isPlaying;
+  }
+
+  isCurrentlyRecording(): boolean {
+    return this.isRecording;
+  }
+
+  // Compatibility method for RepairSession component
+  async setIdleMode(): Promise<void> {
+    await this.stopAll();
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      shouldDuckAndroid: false,
+      playThroughEarpieceAndroid: false,
+      staysActiveInBackground: true,
+    });
+    console.log('🦊🔄 Set to idle mode');
+  }
+
+  // Simple voice interaction
+  async listenAndTranscribe(duration: number = 3000): Promise<string> {
+    await this.startListening();
+    await new Promise(resolve => setTimeout(resolve, duration));
+    return await this.stopListening();
+  }
+
+  async cleanup(): Promise<void> {
+    await this.stopAll();
+  }
+}
